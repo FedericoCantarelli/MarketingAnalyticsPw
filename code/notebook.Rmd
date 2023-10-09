@@ -1,0 +1,937 @@
+---
+title: "Marketing Analytics Project"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+This is the notebook for the project work of Marketing Analytics, A.Y. 2022/2023. In this notebook we will use different marketing analytics techniques to find some insights from the data coming from the cashes of an Italian retailer in the period October 2020 - October 2022.
+
+# Exploratory Data Analysis
+
+## Clearing the environment
+
+```{r}
+rm(list = ls())
+graphics.off()
+```
+
+## Setup packages
+
+```{r}
+library(pacman)
+pacman::p_load("tidyverse", "ggplot2", "dplyr", "lubridate", "readxl",
+               "arules", "arulesViz", "rbokeh", "plotly", "zoo")
+```
+
+## Data loading and merging datasets
+
+```{r}
+data.transaction <- read.csv("./data/dataset.csv", sep = ',', dec = '.')
+data.transaction$date_ticket <- format(data.transaction$date_ticket,
+                                       scientific = F)
+
+products_DB <- read_xlsx("./data/products_DB.xlsx")
+products_DB_supp <- read.csv("./data/Products_DB_Supplement.csv",
+                             header = TRUE, sep =",")
+
+colnames(products_DB) <- c("product_code", "description")
+products_DB <- rbind(products_DB, products_DB_supp)
+
+
+products_DB$product_code <- as.factor(products_DB$product_code)
+data.transaction$product_code <- as.factor(data.transaction$product_code)
+
+data.transaction <- left_join(data.transaction, products_DB)
+
+remove(products_DB_supp, products_DB)
+```
+
+## Analyzing the dataset structure
+
+```{r}
+str(data.transaction)
+```
+
+First of all, let's parse date_ticket column dates.
+
+```{r}
+data.transaction$date_ticket = format(data.transaction$date_ticket,
+                                      scientific = F)
+
+data.transaction$date_ticket <-
+  parse_date_time(as.character(data.transaction$date_ticket),
+                                                orders = c("%Y%m%d%H%M%S"))
+if (!any(is.na(data.transaction$date_ticket)))
+  {print("Dates have been correctly formatted")}
+```
+
+## Checking for missing values
+
+```{r}
+incomplete.cases <- sum(!complete.cases(data.transaction))
+print(paste("There are",incomplete.cases, "incomplete cases"))
+```
+
+## Transforming store_id, customer_id and cashdesk_no into factors
+
+```{r}
+data.transaction$store_id <- as.factor(data.transaction$store_id)
+data.transaction$customer_id <- as.factor(data.transaction$customer_id)
+data.transaction$cashdesk_no <- as.factor(data.transaction$cashdesk_no)
+```
+
+```{r}
+summary(data.transaction)
+```
+
+In this section we want to try to find an answer to these questions:
+
+<ul>
+
+<li>
+
+Why "cashdesk_no" distribution looks so strange?
+
+<li>
+
+Why "quantity" has negative values?
+
+<li>
+
+Why price has negative values?
+
+<li>
+
+There might be a problem related to "ticket_no"
+
+</ul>
+
+## Exploring "cashdesk_no"
+
+First of all, let's take a look to cash_desk_no distribution.
+
+```{r}
+cash_desk_no <- data.frame(t(table(data.transaction$cashdesk_no)))[-1]
+colnames(cash_desk_no) <- c("cashdesk_id", "count")
+cash_desk_no[,"cum_sum"] <- cumsum(cash_desk_no$count)
+cash_desk_no[,"cum_perc"] <- cash_desk_no$cum_sum/sum(cash_desk_no$count)*100
+
+ggplot(data = cash_desk_no, mapping = aes(x = cashdesk_id, y = cum_perc))+
+  geom_point() +
+  geom_hline(aes(yintercept = 50), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 75), color = 'blue', linetype = 'dotted') +
+  geom_hline(aes(yintercept = 90), color = 'darkgreen', linetype = 'twodash') +
+  geom_hline(aes(yintercept = 95), color = 'purple', linetype = 'dotdash')
+```
+
+The purple line is the 95th percentile, the green one the 90th percentile, the blue one the 75th percentile and the red one the 50th percentile.
+
+```{r}
+cash_desk_no[,c(-3)]
+remove(cash_desk_no)
+```
+
+We can see that almost the 99% of cashdesk number is below 6. We see some strange values like 0 or number above 55. We assumed that those numbers were identifier for a particular kind of cashdesk (like automatic cashdesk or system like "prestospesa" of Esselunga). In the end, cashdesk number are part of the unique key but the way they are distributed in the dataset is not relevant for our analysis.
+
+## Exploring "ticket_no"
+
+We fixed the ticket_no attribute so that the data are consistent: now the ticket_no will be sorted by date and will be an ascending number that depends on the customer id and the store id. So, ticket_no will be 1 the first row the first time a customer goes in a specific store and n the n-th record the last time s/he visited that specific store. Please, note that this is not unique ticket number identificator (we will define it later on), but it's just a matter of data cleaning.
+
+```{r}
+data.transaction = data.transaction %>% 
+  group_by(customer_id, store_id) %>% 
+  arrange(date_ticket) %>%
+  mutate(modified_ticket = 1:n()) %>%
+  ungroup()
+```
+
+## Exploring "quantity"
+
+Now let's take a look to quantity attribute.
+
+```{r}
+options(scipen=999) # To remove scientific notation from the plot
+ggplot(data = data.transaction) + 
+  geom_histogram(mapping = aes(x=quantity), binwidth = 1)
+```
+
+Most individual receipt records have attribute quantity equal to one; this means that most items are purchased only once per ticket.
+
+```{r}
+(as.data.frame(table(data.transaction$quantity)))
+```
+
+There are a few items that are purchased in more than 100 units. We assumed that there were no recording errors in the dataset, but in a real case, we would have asked the client why some items were purchased in quantities greater than 50, e.g. customers working for a catering company, in order to deal with those strange values.
+
+```{r}
+quantile(data.transaction$quantity, probs = c(.25,.50,.75,.80,.90,.95, .99))
+```
+
+We can see that the 99% percentile is 6 units. We assumed that
+
+```{r}
+ggplot(data = data.transaction) + 
+  geom_boxplot(mapping = aes(y = quantity))
+```
+
+From the boxplot of the quantity there are some outliers.
+
+```{r}
+print(paste("Total records above 99% percentile:", dim(data.transaction[data.transaction$quantity>6,])[1], sep = " "))
+```
+
+```{r}
+print(paste("Total records below zero:", dim(data.transaction[data.transaction$quantity<0,])[1]))
+```
+
+```{r}
+print(paste("Total records equal to zero:", dim(data.transaction[data.transaction$quantity==0,])[1]))
+```
+
+Since the cardinality of the subset "quantity less than or equal to zero" has an insignificant cardinality compared to the number of total records in the dataset, we decided to drop them.
+
+```{r}
+data.transaction.positive = subset(data.transaction, data.transaction$quantity>0)
+```
+
+## Exploring price
+
+From now on we will consider price attribute
+
+```{r}
+ggplot(data = data.transaction.positive) + 
+  geom_histogram(mapping = aes(x=price), binwidth = 1)
+```
+
+It's important to keep in mind that the variable price is also comprehensive of the quantity, it's not a unitary price.
+
+```{r}
+# Unitary price
+quantile((data.transaction.positive$price/data.transaction.positive$quantity), probs = c(.25,.50,.75,.80,.90,.95, .99))
+```
+
+The 90% of items has an unitary price of 3.19€. Moreover, the 25% of items has a price below 1€.
+
+```{r}
+# Single record value
+quantile(data.transaction.positive$price, probs = c(.25,.50,.75,.80,.90,.95, .99))
+```
+
+Almost all the records have a value below 10€
+
+```{r}
+ggplot(data = data.transaction.positive) + 
+  geom_boxplot(mapping = aes(y = price))
+```
+
+There are some outliers and some negative values. As before, we decided to drop records with price equal to or less then 0.
+
+```{r}
+print(paste("Total records below zero:", dim(data.transaction.positive[data.transaction.positive$price<0,])[1]))
+```
+
+```{r}
+print(paste("Total records equal to zero:", dim(data.transaction.positive[data.transaction.positive$price==0,])[1]))
+```
+
+```{r}
+print(paste("Total records above 99% percentile:", dim(data.transaction.positive[data.transaction.positive$price>9.8,])[1]))
+```
+
+```{r}
+data.transaction.positive = subset(data.transaction.positive, data.transaction.positive$price>0)
+```
+
+## Creating the unique key
+
+```{r}
+# Removing the possible spaces that could cause pasting issues
+data.transaction.positive$customer_id <- gsub(" ", "",
+                                         data.transaction.positive$customer_id)
+data.transaction.positive$store_id <- gsub(" ", "",
+                                      data.transaction.positive$store_id)
+
+data.transaction.positive$date_ticket <- gsub(" ", "",
+                                         data.transaction.positive$date_ticket)
+
+data.transaction.positive$cashdesk_no <- gsub(" ", "",
+                                         data.transaction.positive$cashdesk_no)
+
+Key <-paste(data.transaction.positive$customer_id,
+            gsub("-", "", date(data.transaction.positive$date_ticket)),
+            paste(formatC(hour(data.transaction.positive$date_ticket), width = 2, format = "d", flag = "0"),
+                  formatC(minute(data.transaction.positive$date_ticket), width = 2, format = "d", flag = "0"),
+                  formatC(second(data.transaction.positive$date_ticket), width = 2, format = "d", flag = "0"),
+                  sep=""),
+            data.transaction.positive$store_id,
+            data.transaction.positive$cashdesk_no,
+            sep = "-")
+
+data.transaction.positive <- cbind(data.transaction.positive, Key)
+remove(Key)
+
+# Number of unique transactions
+length(unique(data.transaction.positive$Key))
+```
+
+## Store analysis
+
+Although we want to construct a customer-oriented analysis, we also decided to analyze the distribution of stores to better understand the context of the analysis.
+
+\textcolor{red}{DA CONTROLLARE}
+
+## Building a dataset on store information
+
+```{r}
+stores_info <- data.transaction.positive %>% 
+  group_by(store_id) %>% 
+  summarise(cashdesk_number = length(unique(cashdesk_no)),
+            customers_number = length(unique(customer_id)),
+            revenues = sum(price),
+            customer_longevity = as.numeric(difftime(max(date_ticket), min(date_ticket), units = "days"))) %>% 
+  arrange(desc(revenues))
+
+stores_info <- data.transaction.positive %>% 
+  group_by(store_id, customer_id) %>% 
+  summarise(cashdesk_number = length(unique(cashdesk_no)),
+            customers_number = length(unique(customer_id)),
+            revenues = sum(price),
+            customer_longevity = as.numeric(difftime(max(date_ticket), min(date_ticket), units = "days"))) %>% 
+  group_by(store_id) %>% 
+  summarise(cashdesk_number = length(unique(cashdesk_number)),
+            customers_number = length(unique(customers_number)),
+            revenues = sum(revenues),
+            customer_longevity = max(customer_longevity)
+  ) %>% 
+  arrange(desc(revenues))
+```
+
+```{r}
+# Save for backup purposes
+save(data.transaction.positive, file="dataframe_finale.Rdata")
+```
+
+# RFM analysis
+
+In this section we will perform a first RMF analysis. In the next section we will propose a more advanced RegFM analysis.
+
+## Fist idea: base frequency on the last purchase of one of the most frequent product
+
+## Product ranking by quantity, revenues and frequency of purchase
+
+```{r}
+# We grouped by description because the same item sometimes has more than one
+# product code
+product_ranking <- data.transaction.positive %>% 
+  group_by(description) %>% 
+  summarise(total_quantity = sum(quantity),
+            revenues = sum(price)) %>% 
+  arrange(desc(total_quantity))
+
+
+product_frequency <- as.data.frame(table(data.transaction.positive$description))
+colnames(product_frequency) <- c("description", "frequency")
+product_ranking <- left_join(product_ranking, product_frequency) %>% 
+  arrange(desc(frequency))
+remove(product_frequency)
+```
+
+What are the ten most frequent items purchased?
+
+```{r}
+product_ranking$description[1:10]
+```
+
+## What are the ten most profitable items purchased?
+
+```{r}
+product_ranking %>% arrange(desc(revenues)) %>% head(10) %>% select(description)
+```
+
+## Comparing frequency of purchase with quantity, frequency as a baseline
+
+\textcolor{red}{DA CONTROLLARE}
+
+```{r}
+cum_quantity <- replicate(length(product_ranking$description), 0)
+cum_frequency <- replicate(length(product_ranking$description), 0)
+product_ranking <- cbind.data.frame(product_ranking, cum_quantity, cum_frequency)
+
+product_ranking$cum_quantity[1] <- product_ranking$total_quantity[1]/sum(product_ranking$total_quantity)
+product_ranking$cum_frequency[1] <- product_ranking$frequency[1]/sum(product_ranking$frequency)
+
+for (i in 2:length(product_ranking$description)) {
+  product_ranking$cum_quantity[i] <- product_ranking$cum_quantity[i-1] + 
+    product_ranking$total_quantity[i]/sum(product_ranking$total_quantity)
+  product_ranking$cum_frequency[i] <- product_ranking$cum_frequency[i-1] + 
+    product_ranking$frequency[i]/sum(product_ranking$frequency)
+}
+
+
+plot(product_ranking$cum_frequency,type="l",col="red", ylab = "")
+par(new = TRUE)
+plot(product_ranking$cum_quantity,type="l",col="green", ylab = "Cumulative probability")
+
+remove(cum_frequency, cum_quantity, i)
+```
+
+The two curves show a similar pattern, frequency and quantity have almost the same distribution.
+
+```{r}
+rfm <- data.transaction.positive %>% 
+  group_by(customer_id) %>% 
+  summarise(recency = difftime("2022-10-31", 
+                               max(date_ticket),
+                               units = "weeks"),
+            frequency = n()/104.9418,
+            monetary = (sum(price))/104.9418
+  )
+```
+
+104.9418 is the difference between min and max date in weeks 2022-10-31 is the day after max date
+
+```{r}
+ggplot(data = rfm, aes(y = recency)) +
+  geom_boxplot() + ggtitle("Recency")
+ggplot(data = rfm, aes(y = frequency)) +
+  geom_boxplot() + ggtitle("Frequency")
+ggplot(data = rfm, aes(y = monetary)) +
+  geom_boxplot() + ggtitle("Monetary")
+```
+
+Huge number of outliers.
+
+## 3d plot to see if some particular pattern emerges
+
+```{r}
+rfm$recency <- scale(rfm$recency)
+rfm$frequency <- scale(rfm$frequency)
+rfm$monetary <- scale(rfm$monetary)
+
+library(rgl)
+plot3d( 
+  x=rfm$recency, y=rfm$frequency, z=rfm$monetary, 
+  type = 's', 
+  radius = .1,
+  xlab="Recency", ylab="Frequency", zlab="Monetary")
+```
+
+## Customer analysis
+
+```{r}
+customers_info <- data.transaction.positive %>% 
+  group_by(customer_id) %>% 
+  summarise(customer_lifetime = as.numeric(difftime(max(date_ticket),
+                                                    min(date_ticket),
+                                                    units = "days")), 
+            last_transaction = max(date_ticket),
+            total_purchase = sum(price),
+            avg_purchase = total_purchase/n())
+
+# 5 customes as an example
+head(customers_info, 5)
+```
+
+There are 9998 customers
+
+```{r}
+hist(date(customers_info$last_transaction), breaks = "months", xlab = "Last purchase")
+hist(customers_info$customer_lifetime, xlab = "Customer lifetime")
+hist(stores_info$customer_longevity, xlab = "Customer longevity")
+hist(date(data.transaction.positive$date_ticket), breaks = "months", xlab = "Transaction distribution" )
+```
+
+```{r}
+summary(customers_info)
+```
+
+## Average Basket Size
+
+```{r}
+length(data.transaction.positive$ticket_no)/n_distinct(data.transaction.positive$Key)
+```
+
+## Average spending level
+
+```{r}
+expenditure_per_basket <- data.transaction.positive %>%
+  group_by(Key) %>%
+  summarise(sum_ticket <- sum(price))
+
+colnames(expenditure_per_basket) <- c("Basket", "Basket_Expenditure")
+
+summary(expenditure_per_basket$Basket_Expenditure)
+```
+
+## Understanding the frequencies (PROBLEMA CON QUESTO BLOCCO)
+
+\textcolor{red}{???}
+
+```{r}
+#frequencies <- data.transaction %>% group_by(customer_id) %>%
+#  summarise(as.double(max(date_ticket) - min(date_ticket), 
+#                      units = "days")/length(unique(Key)))
+
+# colnames(frequencies) <- c("Customer", "Frequency in days")
+# View(frequencies)
+
+# mean(frequencies$`Frequency in days`)
+# median(frequencies$`Frequency in days`)
+```
+
+## Cleaning the environment
+
+```{r}
+remove(customers_info, expenditure_per_basket, product_ranking, rfm, stores_info)
+```
+
+# RegFm Analysis
+
+## Connecting dataset with the next script
+
+```{r}
+df <- data.transaction.positive %>% select(-modified_ticket)
+```
+
+## Checking the data frame
+
+```{r}
+colnames(df)[10] <- "Basket" # Changing the Key's name into Basket
+str(df) # Looks fine
+```
+
+Somewhere in the script, dates are transformed back, let's parse them again.
+
+```{r}
+df$date_ticket <-parse_date_time(as.character(df$date_ticket), 
+                                 orders = c("%Y%m%d%H%M%S"))
+```
+
+## Splitting the dataframe in quarters
+
+```{r}
+quartered_df <- split(df, as.yearqtr(df$date_ticket)) 
+period <- quartered_df$`2022 Q3` # Select the quarter you prefer
+```
+
+## Regularity-Frequency-Monetary
+
+```{r}
+RegFMR <- function(period){
+  
+  if (months(max(period$date_ticket)) == "dicembre"){
+    first_of_next_month = ceiling_date(max(period$date_ticket), unit = "years")
+  } else {
+    first_of_next_month = ceiling_date(max(period$date_ticket), unit = "month")
+    }  # Setting the day from which we need to calculate the recency
+  
+  RFM <- period %>%
+    group_by(customer_id) %>%
+    filter(as.numeric(max(date_ticket) - min(date_ticket))> 0) %>%
+    summarise(
+      recency = as.numeric(difftime(first_of_next_month,max(date_ticket),units = "days")),
+      frequency = length(unique(date_ticket)),
+      monetary = sum(price)
+    )
+
+# Comment on how each parameter has been calculated: 
+# Moentary and Frequency = We have decided to take the "absolute" values since we are already considering a quite narrow timeframe (a quarter)
+# Thus, narrowing even further by dividing both measures by the actual time a customer has computed
+# her first and last purchase would have distorted the results.
+# Recency = simple difference between last purchase and first day of the next month
+  
+# Comments for the following lines:
+# We calculated the regularity as the interpurchase time' s coefficient of variation
+# While the recency_mod consists of our NEW METRIC, which is used to cluster our customers in terms of their behaviours
+# and tries to take into consideration the problems that would have stemmed by using the 
+# the simple comparison between recency and the product between regularity and mean inter-purchase time  
+# recency_mod = regularity * log(recency/mean(inter-purchase time))
+  
+  Regularity <- period %>%
+    group_by(customer_id) %>%
+    filter(as.numeric(max(date_ticket)-min(date_ticket))>0) %>%
+    ungroup() %>%
+    group_by(customer_id, date_ticket) %>%
+    summarise(date_ticket = unique(date_ticket)) %>%
+    # mutate(date_days = as.double(date_ticket))%>%
+    mutate(days_from_prev = as.numeric(difftime(date_ticket,min(date_ticket),units="days"))) %>%
+    group_by(customer_id) %>%
+    summarise(regularity =sd(days_from_prev)/mean(days_from_prev),
+              std = sd(days_from_prev), # in order to have it in the dataframe in order to understand the distributions
+              m = mean(days_from_prev), # in order to have it in the dataframe in order to understand the distributions
+              recency_mod = regularity*log(as.numeric(difftime(first_of_next_month,max(date_ticket),units = "days"))/m)
+
+    )
+  
+  RegFMR <- na.omit(left_join(RFM, Regularity, by = "customer_id"))
+  
+# Attributing Temperature: Explanation is below in the code.
+# Here we simply calculate it and add it to the final data frame
+  
+  lower_median <- median(RegFMR$recency_mod[RegFMR$recency_mod < 0])
+  upper_median <- median(RegFMR$recency_mod[RegFMR$recency_mod >= 0])
+  
+  Temperature <- RegFMR %>% 
+    group_by(customer_id) %>% 
+    summarise(
+      Temperature = case_when(
+        recency_mod < lower_median ~ "Hot", 
+        recency_mod > upper_median ~ "Super Cold",
+        recency_mod < 0 & recency_mod > lower_median ~ "Super Hot",
+        TRUE ~ "Super Cold")
+    )
+  
+  RegFMR <- na.omit(left_join(RegFMR, Temperature, by = "customer_id"))
+  return(RegFMR)
+  ggplot(RegFMR, aes(x=frequency)) + geom_histogram()
+}
+```
+
+```{r}
+RegFMR <- RegFMR(period)
+```
+
+Now let's plot everything to understand the behavior and to look for outliers.
+
+```{r}
+ggplot(RegFMR, aes(x=frequency)) + geom_histogram() + ggtitle("Frequency")
+ggplot(RegFMR, aes(x=monetary)) + geom_histogram() + ggtitle("Monetary")
+ggplot(RegFMR, aes(x=recency)) + geom_histogram() + ggtitle("Recency")
+```
+
+```{r}
+ggplot(RegFMR, aes(x=frequency)) + geom_boxplot() + ggtitle("Frequency")
+ggplot(RegFMR, aes(x=monetary)) + geom_boxplot() + ggtitle("Monetary")
+ggplot(RegFMR, aes(x=recency)) + geom_boxplot() + ggtitle("Recency")
+```
+
+```{r}
+quantile(RegFMR$frequency, probs = seq(0, 1, 0.05))
+```
+
+```{r}
+quantile(RegFMR$monetary, probs = seq(0, 1, 0.05))
+```
+
+```{r}
+quantile(RegFMR$recency, probs = seq(0, 1, 0.05))
+```
+
+```{r}
+ggplot(RegFMR, aes(x=frequency)) + geom_density() + ggtitle("Frequency")
+ggplot(RegFMR, aes(x=monetary)) + geom_density() + ggtitle("Monetary")
+```
+
+## Cutting off outliers
+
+From what has been seen from the previous graphs, and considering which type of shops we are looking at the following data customers will be considered as outliers: if they have visited the shops more than 67 days in 90 disposable (ca. 3/4) and have spent more than 10 ??? for purchase. These threshold have been taken into account given the mean behavior of our customers overall. Note that we had to take into account the last quarter that is made of just one month...
+
+```{r}
+ggplot(RegFMR, aes(x=monetary, y=frequency)) + geom_point() + geom_hline(yintercept = 90*3/4, col = "red", linetype = "dotdash") + geom_vline(xintercept = 10*90*3/4,  col = "red", linetype = "dotdash")
+```
+
+```{r}
+if (months(max(period$date_ticket)) == "ottobre"){
+  
+  RegFMR_Outliers <- RegFMR %>% 
+    filter(frequency > 30*3/4 | monetary > 30*10*3/4)
+  
+  RegFMR <- RegFMR %>% 
+    filter(frequency <= 30*3/4 & monetary <= 30*10*3/4)
+
+  }else {
+
+    RegFMR_Outliers <- RegFMR %>% 
+      filter(frequency > 90*3/4 | monetary > 90*10*3/4)
+    
+    RegFMR <- RegFMR %>% 
+      filter(frequency <= 90*3/4 & monetary <= 90*10*3/4)
+}
+```
+
+```{r}
+summary(RegFMR)
+```
+
+# Score attribution
+
+```{r}
+scoring <- function(RegFMR){
+  RegFMR <- RegFMR %>% mutate (Reg=case_when(regularity <= quantile(RegFMR$regularity, probs = 0.25) ~ 1,
+                                             regularity > quantile(RegFMR$regularity, probs = 0.25) & regularity <=
+                                               quantile(RegFMR$regularity, probs = 0.5) ~ 2, regularity >
+                                               quantile(RegFMR$regularity, probs = 0.5) & regularity <=
+                                               quantile(RegFMR$regularity, probs = 0.75) ~ 3, regularity >
+                                               quantile(RegFMR$regularity, probs = 0.75) ~ 4 )) %>% 
+    mutate (F=case_when(frequency <= quantile(RegFMR$frequency, probs = 0.25) ~ 1, frequency >
+                          quantile(RegFMR$frequency, probs = 0.25) & frequency <= quantile(RegFMR$frequency, probs
+                                                                                           = 0.5) ~ 2, frequency >
+                          quantile(RegFMR$frequency, probs = 0.5) & frequency <= quantile(RegFMR$frequency, probs =
+                                                                                            0.75) ~ 3, frequency >
+                          quantile(RegFMR$frequency, probs = 0.75) ~ 4 )) %>%
+    mutate (M=case_when(monetary <= quantile(RegFMR$monetary, probs = 0.25) ~ 1, monetary >
+                          quantile(RegFMR$monetary, probs = 0.25) & monetary <= quantile(RegFMR$monetary, probs =
+                                                                                           0.5) ~ 2, monetary>
+                          quantile(RegFMR$monetary, probs = 0.5) & monetary <=quantile(RegFMR$monetary, probs =
+                                                                                         0.75) ~ 3, monetary >
+                          quantile(RegFMR$monetary, probs = 0.75) ~ 4 ))
+  RegFMR = RegFMR %>% mutate(RegFMR = Reg * 100 + F * 10 + M)
+  RegFMR$RegFMR = as.factor(RegFMR$RegFMR)
+  RegFM_1 = RegFMR %>% select(customer_id,RegFMR) %>% filter(RegFMR==444 | RegFMR==134 | RegFMR==143 | RegFMR==133
+                                                             | RegFMR==144)
+  RegFM_1 = RegFM_1 %>% mutate (cluster = case_when(RegFMR==444 ~ "Champions", TRUE ~ "Needing Attention" ))
+  RegFM_1$cluster = as.factor(RegFM_1$cluster)
+  print(table(RegFM_1$cluster))
+  
+  return(RegFMR)
+}
+```
+
+Call the function implemented
+
+```{r}
+RegFMR <- scoring(RegFMR)
+```
+
+## Attribute SuperHot, Hot, Cold and Super Cold to costumers
+
+Notice that the attribution has been already done above in the function RegFMR(). Here we are just showing a glimpse of how we took that decision. Knowing that the distribution is not symmetric and knowing that our metric recency_mod suggests us that negative values are "hotter" than positive ones and that values near to 0 are "preferred" than larger values in absolute terms, we came up with the decision to create 4 clusters using 2 medians: One of the "hot" side and one for the "cold" one.
+
+```{r}
+lower_median <- median(RegFMR$recency_mod[RegFMR$recency_mod < 0])
+upper_median <- median(RegFMR$recency_mod[RegFMR$recency_mod >= 0])
+```
+
+```{r}
+ggplot(RegFMR, aes(x=recency_mod)) + 
+  geom_histogram(binwidth=0.5, color="black", fill="black", aes(y = after_stat(count / sum(count))))+
+  scale_x_continuous(breaks = round(seq(min(RegFMR$recency_mod), max(RegFMR$recency_mod), by = 1.5),1)) +
+  geom_vline(xintercept = median(RegFMR$recency_mod),  col = "yellow")+
+  geom_vline(xintercept = c(lower_median, upper_median, 0),  col = "red")
+```
+
+```{r}
+q_super_cold <- length(RegFMR$recency_mod[RegFMR$recency_mod > upper_median])/length(RegFMR$recency_mod)
+q_super_hot <- length(RegFMR$recency_mod[RegFMR$recency_mod > lower_median & RegFMR$recency_mod <= 0])/length(RegFMR$recency_mod)
+q_cold <- q_super_cold # By construction
+q_hot <- q_super_hot # By construction
+```
+
+It's important to consider that now our dataset consists of 6264 customers that have made a transaction during the considered period.
+
+```{r}
+# Saving for backup
+save(RegFMR, file="RegFMR.Rdata")
+```
+
+# ASSOCIATION RULES
+
+## Clearing the environment
+
+```{r}
+# Remove the useless objects for the market basket analysis
+remove(period, lower_median, upper_median, scoring, df)
+```
+
+## Initial consideration on market basket analysis
+
+We know that before starting the market basket analysis we have to deal with the dimensionality problem of transactions dataset: we need to check that the SKUs are aggregated at a such level that allows us to maintain an adequate level of detail and acceptable computational time. From an initial analysis, we realized that the Product_db_code database was probably already preprocessed in order to reduce dataset dimensions while maintaining an adequate level of detail. Indeed, it seems to us that the trade-off described earlier has been met. So we did not perform any further operation. In our analysis we also wanted to include virtual variables, i.e., dummy items within market basket in order to find more targeted rules. In particular, we decided to add the customer cluster obtained from our previous analysis (in fact we want to get customer-oriented rules) and the day of the week when the transaction took place. Unfortunately, we weren't able to include any other virtual variable. It would be interesting, since the supermarket chain is already set up to collect customers data, to perform further analysis with more demographic data and with data regarding promotions on particular product.
+
+## Set up transactions object
+
+```{r}
+str(RegFMR)
+```
+
+We focused our RegFMR analysis on the last quarter of the transaction dataframe. So we need to made a left join on the RegFMR dataframe to consider only the costumers we clustered.
+
+```{r}
+arules.data <- left_join(RegFMR, data.transaction.positive, by = "customer_id")
+```
+
+Now we need to add also the day of the week and discretized basket amount in order to perform the MBA with virtual variables. Indeed, as mentioned before, we will need to add the virtual variable as a dummy item in the market basket.
+
+```{r}
+# Parse dates
+arules.data$date_ticket <-
+  parse_date_time(as.character(arules.data$date_ticket),
+                  orders = c("%Y%m%d%H%M%S"))
+```
+
+Creating the transactions structure for basic MBA.
+
+```{r}
+trans_list <- arules.data %>% group_by(Key) %>%
+  summarise(items=list(description))
+basic.rules <- transactions(trans_list$items)
+```
+Saving for backup.
+
+```{r}
+save(basic.rules, file="arules_base.Rdata")
+```
+
+Creating the transactions structure for advanced MBA.
+
+```{r}
+trans_list_advanced <- arules.data %>% group_by(Key, RegFMR) %>% summarise(items_adv = paste0(description, collapse = ", "),
+                                                                           tot.expense=sum(price),
+                                                                           weekday = wday(unique(date_ticket), label=T,
+                                                                                          abbr = T))
+
+trans_list_advanced$weekday <- factor(trans_list_advanced$weekday,
+                               levels = c("Mon", "Tue", "Wed",
+                                          "Thu", "Fri", "Sat",
+                                          "Sun"))
+```
+
+```{r}
+# Explore total expense
+summary(trans_list_advanced$tot.expense)
+options(scipen=999) # To remove scientific notation from the plot
+hist(trans_list_advanced$tot.expense)
+```
+We need to discretize the attribute tot.expenses in order to gain more useful insights. We chose to use five percentiles in order to have low value tickets, medium-low value tickets, medium, medium-high and high value tickets.
+```{r}
+#Search percentiles for discretizing tot.expenses variables
+quantile(trans_list_advanced$tot.expense, c(0.2, 0.4, 0.6, 0.8))
+```
+
+```{r}
+# Create discrete variable
+trans_list_advanced$tot.expense.cutted <- cut(trans_list_advanced$tot.expense,
+                   breaks = c(0, 3.28, 5.98, 9.69, 16.23, max(trans_list_advanced$tot.expense)),
+                   labels = c("low ticket value", "medium-low ticket value", "medium ticket value", "medium-high ticket value", "high ticket value"),
+                   right = TRUE, ordered_result=TRUE)
+trans_list_advanced$tot.expense.cutted <- as.factor(trans_list_advanced$tot.expense.cutted)
+par(mar = c(8,4,1,1))
+ggplot(trans_list_advanced, aes(x=tot.expense.cutted)) + 
+  geom_bar() + ggtitle("Discretized variable expenses", ) + theme(axis.text.x = element_text(angle = 90))
+```
+```{r}
+# Explore distribution divided by group
+par(mar=c(11,4,3,.3))
+boxplot(trans_list_advanced$tot.expense ~ trans_list_advanced$tot.expense.cutted, xlab="", ylab="Ticket nominal value (€)", las=2, main="Boxplot for Ticket Value")
+```
+We cam see from the boxplot that, apart for the last group, distributions are pretty regular among different groups.
+
+```{r}
+# Eplore variable weekday
+options(scipen=999) # To remove scientific notation from the plot
+plot(table(trans_list_advanced$weekday), xlab = "Weekdays", ylab = "Count", type = "h")
+```
+
+```{r}
+trans_list_advanced$final = paste(trans_list_advanced$RegFMR, trans_list_advanced$items_adv, trans_list_advanced$weekday, trans_list_advanced$tot.expense.cutted, sep = ", ")
+trans_list_advanced$final = str_split(trans_list_advanced$final, ", ")
+```
+
+```{r}
+# Create advanced rules structure (with virtual items)
+advanced.rules <-transactions(trans_list_advanced$final)
+inspect(head(advanced.rules, 5))
+```
+
+Saving for backup
+
+```{r}
+save(advanced.rules, file = "arules_advanced.Rdata")
+```
+
+### Item frequency 
+
+```{r}
+freq35= rev(tail(sort(itemFrequency(basic.rules)), 35))
+par(mar=c(10,4,1,1))
+barplot(freq35, las=2, cex.names=0.8, main = "First 35 items with higher support")
+```
+```{r}
+freq35= rev(head(sort(itemFrequency(basic.rules)),35))
+par(mar=c(10,5,1,1))
+barplot(freq35, las=2, cex.names=0.8, main = "Last 35 items with low support")
+```
+
+
+## Base market basket analysis
+
+```{r}
+rules_found_base <- sort(apriori(basic.rules,
+                                 parameter=list(supp=0.001, conf=0.3), maxlen=4),
+                         by = "lift") # Sorting rules by lift
+
+plot(rules_found_base, measure = c("support", "lift"), shading = "confidence")
+plot(rules_found_base, method = "two-key plot")
+```
+
+Saving for backup.
+
+```{r}
+save(rules_found_base, file="./data/rules_found_base.Rdata")
+```
+Since we found 455 rules and R doesn't allow to go through graph interactively in an efficient way, we decided to export the rules found as graphml in order to analyze the rules with [Gephi](https://gephi.org/users/download/).
+```{r}
+saveAsGraph(rules_found_base, file = "rules_base.graphml")
+```
+From the plots above we can draw some interesting conclusions:
+
+* Most of rules have similar values of support and lift
+* There is one rule with a really high lift (more than 20)
+* There is one rule with a really high support (almost 4 times the other rules) with a low confidence though
+* Most of rules have length of 3, but there are some rules with length 2, these rules could be interesting
+
+Let's take a look to the rules.
+
+```{r}
+inspect(head(rules_found_base,10))
+```
+
+Let's search also for rules with a low lift, since they could be substitute product.
+
+```{r}
+inspect(tail(rules_found_base,10, by="lift"))
+```
+
+Since the lift is always greater of 1, there aren't any substitutive products.
+
+Now explore the rules with order=2, these rules are more robust to "casual association" due to considering too much items. If we were to consider an infinite order, we would get the modal receipt, which is the most common receipt, from which we could not derive any actionable rule.
+
+```{r}
+rules.2.order <- subset(rules_found_base, size(lhs)==1)
+inspect(head(rules.2.order))
+```
+
+Considering the first 10 rules and plot the graph (by a measure of lift).
+
+```{r}
+rules_found_base_highlight <- head(rules_found_base, 40)
+plot(rules_found_base_highlight, method="graph", control=list(type="items"), 
+     engine = "htmlwidget")
+```
+
+```{r}
+plot(head(rules_found_base, 20), method = "graph")
+```
+
+
+
+## MBA with virtual variable
+
+```{r}
+rules_found_advanced <- sort(apriori(advanced.rules,
+                                 parameter=list(supp=0.001, conf=0.3), maxlen=8),
+                         by = c("confidence")) # Sorting rules by lift
+
+plot(rules_found_advanced, measure = c("support", "confidence"), shading = "lift")
+plot(rules_found_advanced, method = "two-key plot")
+```
+
+```{r}
+rules_found_advanced_highlight <- head(rules_found_advanced, 20)
+plot(rules_found_advanced_highlight, method="graph", control=list(type="items"), 
+     engine = "htmlwidget")
+```
+```{r}
+saveAsGraph(rules_found_advanced, file = "rules_advanced.graphml")
+```

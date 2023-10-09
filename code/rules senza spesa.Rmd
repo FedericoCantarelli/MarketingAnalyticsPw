@@ -1,0 +1,136 @@
+---
+title: "Marketing Analytics Project"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+This is the notebook for the project work of Marketing Analytics, A.Y. 2022/2023. In this notebook we will use different marketing analytics techniques to find some insights from the data coming from the cashes of an Italian retailer in the period October 2020 - October 2022.
+
+# Exploratory Data Analysis
+
+## Clearing the environment
+
+```{r}
+rm(list = ls())
+graphics.off()
+```
+
+## Setup packages
+
+```{r}
+library(pacman)
+pacman::p_load("tidyverse", "ggplot2", "dplyr", "lubridate", "readxl",
+               "arules", "arulesViz", "rbokeh", "plotly", "zoo")
+```
+
+# ASSOCIATION RULES
+## Clearing the environment
+```{r}
+load("./data/dataframe_finale.Rdata")
+load("./data/RegFMR.Rdata")
+```
+
+```{r}
+arules.data <- left_join(RegFMR, data.transaction.positive, by = "customer_id")
+```
+
+```{r}
+# Parse dates
+arules.data$date_ticket <-
+  parse_date_time(as.character(arules.data$date_ticket),
+                  orders = c("%Y%m%d%H%M%S"))
+```
+
+
+```{r}
+trans_list_advanced <- arules.data %>% group_by(Key, RegFMR) %>% summarise(items_adv = paste0(description, collapse = ", "),
+                                                                           weekday = wday(unique(date_ticket), label=T,
+                                                                                          abbr = T))
+
+trans_list_advanced$weekday <- factor(trans_list_advanced$weekday,
+                               levels = c("Mon", "Tue", "Wed",
+                                          "Thu", "Fri", "Sat",
+                                          "Sun"))
+```
+
+
+
+```{r}
+trans_list_advanced$final = paste(trans_list_advanced$RegFMR, trans_list_advanced$items_adv, trans_list_advanced$weekday, sep = ", ")
+trans_list_advanced$final = str_split(trans_list_advanced$final, ", ")
+```
+
+```{r}
+# Create advanced rules structure (with virtual items)
+advanced.rules <-transactions(trans_list_advanced$final)
+inspect(head(advanced.rules, 5))
+```
+
+Saving for backup
+
+```{r}
+save(advanced.rules, file = "arules_advanced_noexp.Rdata")
+```
+
+
+
+```{r}
+rules_found_base <- sort(apriori(basic.rules,
+                                 parameter=list(supp=0.001, conf=0.3), maxlen=4),
+                         by = "lift") # Sorting rules by lift
+
+plot(rules_found_base, measure = c("support", "lift"), shading = "confidence")
+plot(rules_found_base, method = "two-key plot")
+```
+
+
+Let's search also for rules with a low lift, since they could be substitute product.
+
+```{r}
+inspect(tail(rules_found_base,10, by="lift"))
+```
+
+Since the lift is always greater of 1, there aren't any substitutive products.
+
+Now explore the rules with order=2, these rules are more robust to "casual association" due to considering too much items. If we were to consider an infinite order, we would get the modal receipt, which is the most common receipt, from which we could not derive any actionable rule.
+
+```{r}
+rules.2.order <- subset(rules_found_base, size(lhs)==1)
+inspect(head(rules.2.order))
+```
+
+Considering the first 10 rules and plot the graph (by a measure of lift).
+
+```{r}
+rules_found_base_highlight <- head(rules_found_base, 40)
+plot(rules_found_base_highlight, method="graph", control=list(type="items"), 
+     engine = "htmlwidget")
+```
+
+```{r}
+plot(head(rules_found_base, 20), method = "graph")
+```
+
+
+
+## MBA with virtual variable
+
+```{r}
+rules_found_advanced <- sort(apriori(advanced.rules,
+                                 parameter=list(supp=0.001, conf=0.3), maxlen=8),
+                         by = c("confidence")) # Sorting rules by lift
+
+plot(rules_found_advanced, measure = c("support", "confidence"), shading = "lift")
+plot(rules_found_advanced, method = "two-key plot")
+```
+
+```{r}
+rules_found_advanced_highlight <- head(rules_found_advanced, 20)
+plot(rules_found_advanced_highlight, method="graph", control=list(type="items"), 
+     engine = "htmlwidget")
+```
+```{r}
+saveAsGraph(rules_found_advanced, file = "rules_advanced.graphml")
+```
